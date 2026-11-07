@@ -1,22 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Chat from 'podchat-browser';
 
 const env = import.meta.env;
 
-/**
- * هوک مدیریت اتصال به podchat و گفتگو با ربات.
- * status: connecting | ready | error
- */
 export function usePodChat() {
   const chatRef = useRef(null);
-  const threadIdRef = useRef(env.VITE_BOT_THREAD_ID ? Number(env.VITE_BOT_THREAD_ID) : null);
-  const myUserIdRef = useRef(null);
-  const [status, setStatus] = useState('connecting');
-  const [messages, setMessages] = useState([]);
-
-  const addMessage = useCallback((msg) => {
-    setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-  }, []);
+  const [status, setStatus] = useState('connecting'); // connecting | ready | error
+  const [threadId, setThreadId] = useState(null);
 
   useEffect(() => {
     const chat = new Chat({
@@ -32,27 +22,29 @@ export function usePodChat() {
       connectionRetryInterval: 5000,
       enableCache: false,
       fullResponseObject: true,
+      asyncLogging: {
+        onFunction: false,
+        onMessageReceive: false,
+        onMessageSend: false,
+        actualTiming: false,
+      },
     });
     chatRef.current = chat;
 
-    chat.on('chatReady', async () => {
-      try {
-        const user = chat.getCurrentUser?.();
-        myUserIdRef.current = user?.id ?? null;
-        await ensureThread(chat, threadIdRef);
-        await loadHistory(chat, threadIdRef.current, myUserIdRef.current, setMessages);
-        setStatus('ready');
-      } catch (e) {
-        console.error(e);
-        setStatus('error');
-      }
-    });
-
-    chat.on('messageEvents', (event) => {
-      if (event.type !== 'MESSAGE_NEW') return;
-      const m = event.result?.message;
-      if (!m || m.threadId !== threadIdRef.current) return;
-      addMessage(normalize(m, myUserIdRef.current));
+    chat.on('chatReady', () => {
+      chat.createThread(
+        {
+          type: 'NORMAL',
+          invitees: [{ id: env.VITE_BOT_USERNAME, idType: 'TO_BE_USER_USERNAME' }],
+        },
+        (res) => {
+          console.log('createThread response', res);
+          const id = res?.result?.thread?.id;
+          if (res?.hasError || !id) return setStatus('error');
+          setThreadId(id);
+          setStatus('ready');
+        },
+      );
     });
 
     chat.on('error', (err) => {
@@ -60,59 +52,8 @@ export function usePodChat() {
       setStatus('error');
     });
 
-    return () => {
-      chat.logout?.();
-    };
-  }, [addMessage]);
+    return () => chat.logout?.();
+  }, []);
 
-  const send = useCallback((text) => {
-    const chat = chatRef.current;
-    const threadId = threadIdRef.current;
-    if (!chat || !threadId || !text.trim()) return;
-    chat.sendTextMessage({ threadId, textMessage: text }, {
-      onSent: (res) => {
-        const id = res?.result?.messageId ?? res?.messageId ?? `local-${Date.now()}`;
-        addMessage({ id, text, mine: true, time: Date.now() });
-      },
-    });
-  }, [addMessage]);
-
-  return { status, messages, send };
-}
-
-function ensureThread(chat, threadIdRef) {
-  if (threadIdRef.current) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    chat.createThread(
-      {
-        type: 'NORMAL',
-        invitees: [{ id: env.VITE_BOT_USERNAME, idType: 'TO_BE_USER_USERNAME' }],
-      },
-      (res) => {
-        const id = res?.result?.thread?.id;
-        if (res?.hasError || !id) return reject(new Error('createThread failed'));
-        threadIdRef.current = id;
-        resolve();
-      },
-    );
-  });
-}
-
-function loadHistory(chat, threadId, myUserId, setMessages) {
-  return new Promise((resolve) => {
-    chat.getHistory({ threadId, count: 50, order: 'asc' }, (res) => {
-      const list = res?.result?.history ?? [];
-      setMessages(list.map((m) => normalize(m, myUserId)));
-      resolve();
-    });
-  });
-}
-
-function normalize(m, myUserId) {
-  return {
-    id: m.id,
-    text: m.message,
-    mine: m.participant?.id === myUserId,
-    time: m.time ? Math.floor(m.time / 1000000) : Date.now(),
-  };
+  return { status, threadId };
 }
